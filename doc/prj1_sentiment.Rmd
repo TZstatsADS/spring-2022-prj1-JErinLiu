@@ -1,0 +1,282 @@
+---
+title: "prj1_sentiment"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+```{r, eval=FALSE}
+packages.used=c("rvest", "tibble", 
+                "sentimentr", "gplots", "dplyr",
+                "tm", "syuzhet", "factoextra", 
+                "beeswarm", "scales", "RColorBrewer",
+                "RANN", "topicmodels", "stringr")
+packages.needed=setdiff(packages.used, 
+                        intersect(installed.packages()[,1], 
+                                  packages.used))
+if(length(packages.needed)>0){
+  install.packages(packages.needed, dependencies = TRUE)
+}
+library("rvest")
+library("tibble")
+library("syuzhet")
+library("sentimentr")
+library("gplots")
+library("dplyr")
+library("tm")
+library("syuzhet")
+library("factoextra")
+library("beeswarm")
+library("scales")
+library("RColorBrewer")
+library("RANN")
+library("tm")
+library("topicmodels")
+library("stringr")
+```
+
+```{r}
+print(R.version)
+```
+
+```{r}
+philo_data <- read.csv("../data/philosophy_data.csv", stringsAsFactors = F)
+head(philo_data)
+```
+
+```{r}
+set.seed(3)
+data_reduced <- philo_data %>% group_by(school) %>% 
+  slice_sample(n=100)
+summary(data_reduced)
+```
+
+```{r}
+data_reduced2 <- data_reduced %>% select(school, original_publication_date, sentence_lowered)
+```
+
+
+```{r, message=F}
+sentence.list <- NULL
+for(i in 1:nrow(data_reduced2)){
+  sentences <- syuzhet::get_sentences(data_reduced2$sentence_lowered[i])
+  if(length(sentences) > 0){
+    emotions <- matrix(emotion(sentences)$emotion,
+                       nrow = length(sentences),
+                       byrow = T)
+    colnames(emotions) <- emotion(sentences[1])$emotion_type
+    emotions <- data.frame(emotions)
+    emotions <- select(emotions, anticipation, joy, surprise, trust, anger, disgust, fear, sadness)
+    word.count <- str_count(sentences, '\\w+')
+    sentence.list <- rbind(sentence.list,
+        cbind(data_reduced2[i, -3], 
+              sentences = as.character(sentences),
+              word_count = word.count, emotions,
+              sent.id = 1 : length(sentences)
+              ))
+  } 
+}
+dim(sentence.list)
+```
+```{r}
+par(mar = c(4, 11, 2, 2))
+sentence.list$school <- factor(sentence.list$school)
+sentence.list$school_ordered <- reorder(sentence.list$school,
+                                       sentence.list$word_count,
+                                       mean, order = T)
+png(file = "../figs/word_number_seed3.png")
+beeswarm(word_count~school_ordered, data = sentence.list,
+        horizontal = T, pch = 16, 
+        col = alpha(brewer.pal(9, "Set1"), 0.6), 
+        cex = .55, cex.axis = .8,cex.lab = .8,
+        spacing = 4/nlevels(sentence.list$school_ordered),
+        las = 2, xlab = "Number of words in a sentance.",
+        ylab = "")
+```
+
+```{r}
+sentence.list=
+  sentence.list%>% ungroup() %>%
+  filter(!word_count==0)
+```
+
+```{r}
+speech.df=as_tibble(sentence.list)%>%
+  filter(school == "analytic", word_count>=5)%>%
+  select(sentences, anticipation:sadness)
+speech.df=as.data.frame(speech.df)
+as.character(speech.df$sentences[apply(speech.df[,-1], 2, which.max)])
+```
+
+```{r}
+png(file = "../figs/heatmap_seed3.png")
+heatmap.2(cor(sentence.list %>% select(anticipation:sadness)),
+          scale = "none", col = bluered(100), margins = c(6, 6), 
+          key = F, trace = "none", density.info = "none")
+par(mar = c(4, 6, 2, 1))
+```
+
+```{r}
+emo.means=colMeans(select(sentence.list, anticipation:sadness)>0.01)
+col.use=c("darkgoldenrod1", "darkgoldenrod1", "darkgoldenrod1", "darkgoldenrod1", "red2", "chartreuse3", "blueviolet","dodgerblue3")
+barplot(emo.means[order(emo.means)], las=2,
+        col=col.use[order(emo.means)], horiz=T, 
+        main="Philosophy Data")
+```
+
+```{r}
+philo.summary <- as_tibble(sentence.list) %>%
+  group_by(school)%>%
+  summarise(
+    anger=mean(anger),
+    anticipation=mean(anticipation),
+    disgust=mean(disgust),
+    fear=mean(fear),
+    joy=mean(joy),
+    sadness=mean(sadness),
+    surprise=mean(surprise),
+    trust=mean(trust)
+  )
+philo.summary <- as.data.frame(philo.summary)
+rownames(philo.summary)=as.character((philo.summary[,1]))
+km.res <- kmeans(philo.summary[,-1], iter.max=200, 5)
+fviz_cluster(km.res, 
+             stand=F, repel= TRUE,
+             data = philo.summary[,-1], xlab="", xaxt="n",
+             show.clust.cent=FALSE)
+```
+
+## wordcloud
+```{r}
+library(tm)
+library(RColorBrewer)
+library(wordcloud)
+library(SnowballC)
+library(topicmodels)
+```
+
+```{r}
+wordc.fun <- function(text, name, n){
+  docs <- Corpus(VectorSource(text))
+  docs <- docs %>%
+    tm_map(removeNumbers) %>%
+    tm_map(removePunctuation) %>%
+    tm_map(stripWhitespace) %>%
+    tm_map(removeWords, c("the", "and", stopwords("en")))
+  docs <- tm_map(docs, content_transformer(tolower))
+  docs <- tm_map(docs, removeWords, stopwords("english"))
+  dtm <- TermDocumentMatrix(docs)
+  dtm <- removeSparseTerms(dtm, .95)
+  matrix <- as.matrix(dtm) 
+  words <- sort(rowSums(matrix),decreasing=TRUE) 
+  df <- data.frame(word = names(words),freq=words)
+  jpeg(file = paste0(c("../figs/wordcloud_", 
+                      name, ".png"), collapse = ""))
+  wordcloud(words = df$word, freq = df$freq, min.freq = 1,      
+          max.words=n, random.order=FALSE, rot.per=0.35,        
+          colors=brewer.pal(sample(1:9,1), "Dark2"))
+}
+```
+
+```{r}
+data.text <- data_reduced %>% group_by(school) %>%
+  summarize(text = paste0(sentence_lowered, collapse = " ")) %>%
+  ungroup()
+```
+
+```{r}
+i <- 7
+wordc.fun(data.text$text[i], data.text$school[i],100)
+```
+
+
+```{r,message=F, warning=F}
+for(i in 1:13){
+  wordc.fun(data.text$text[i], data.text$school[i],100)
+}
+```
+
+## topic modeling
+```{r}
+doc <- data_reduced # %>% filter(school == "plato")
+docs <- Corpus(VectorSource(doc$sentence_lowered))
+writeLines(as.character(docs[[sample(1:nrow(doc), 1)]]))
+```
+
+```{r}
+docs <- tm_map(docs, removePunctuation)
+docs <- tm_map(docs, removeNumbers)
+docs <- tm_map(docs, removeWords, stopwords("english"))
+docs <- tm_map(docs, stripWhitespace)
+docs <- tm_map(docs,stemDocument)
+```
+
+```{r}
+minimumFreq <- 5
+dtm <- DocumentTermMatrix(docs)
+sel_idx <- slam::row_sums(dtm) > 0
+dtm <- dtm[sel_idx,]
+doc <- doc[sel_idx,]
+dim(dtm)
+```
+
+
+```{r}
+#Set parameters for Gibbs sampling
+burnin <- 4000
+iter <- 2000
+thin <- 500
+seed <-list(2003,5,63,100001,765)
+nstart <- 5
+best <- TRUE
+#Number of topics
+k <- 10
+#Run LDA using Gibbs sampling
+ldaOut <-LDA(dtm, k, method="Gibbs", control=list(nstart=nstart, 
+                                                 seed = seed,
+                                                 best=best,
+                                                 burnin = burnin,
+                                                 iter = iter, 
+                                                 thin=thin))
+ldaOut.topics <- as.matrix(topics(ldaOut))
+table(c(1:k, ldaOut.topics))
+```
+
+```{r}
+terms.beta=ldaOut@beta
+terms.beta=scale(terms.beta)
+topics.terms=NULL
+for(i in 1:k){
+  topics.terms=rbind(topics.terms,
+                     ldaOut@terms[order(terms.beta[i,],
+                        decreasing = TRUE)[1:7]])
+}
+topics.terms
+```
+
+```{r}
+ldaOut.terms <- as.matrix(terms(ldaOut,20))
+ldaOut.terms
+topicProbabilities <- as.data.frame(ldaOut@gamma)
+```
+
+```{r}
+par(mar=c(1,1,1,1))
+topic.summary=tbl_df(corpus.list.df)%>%
+              filter(type%in%c("nomin", "inaug"), File%in%sel.comparison)%>%
+              select(File, Unity:SpeechTemporal)%>%
+              group_by(File)%>%
+              summarise_each(funs(mean))
+topic.summary=as.data.frame(topic.summary)
+rownames(topic.summary)=topic.summary[,1]
+#"Unity", "Belief", "Reform", "Constitution", "WorkingFamilies", 
+#"Leadership", "Speech", "Government", "Freedom", "ForeignRelations",
+#"Economy", "Patriotism", "Election", "America", "SpeechTemporal"
+topic.plot=c(2, 4, 5, 9, 10,11,12,14)
+print(topics.hash[topic.plot])
+```
+
+
+
+
+
